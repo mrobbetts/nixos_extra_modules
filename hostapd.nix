@@ -63,6 +63,7 @@ in
 
 {
 
+  # We are overriding an upstream module here. So, disable that.
   disabledModules = [ "services/networking/hostapd.nix" ];
 
   ###### interface
