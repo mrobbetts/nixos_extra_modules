@@ -136,7 +136,7 @@ in
                   type = types.nullOr types.str;
                   example = "75mbit";
                   description = ''
-                    A string describing the available outgoing bandwidth, compatible with `tc`.
+                    A string describing the available incoming bandwidth, compatible with `tc`.
                   '';
                 };
 
