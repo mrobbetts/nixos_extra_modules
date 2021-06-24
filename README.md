@@ -1,4 +1,4 @@
-# nixos_extra_modules
+# nixos extra modules
 A few custom modules for NixOS.
 
 Check this folder out somewhere (e.g. `/etc/nixos/extra-modules`), then include the files in `configuration.nix` as part of the `imports` list.
