@@ -4,7 +4,7 @@ let
   cfg = config.networking.siteNetwork;
 
   # Helper stuff.
-  toVirIfName = n: v: "vlan_${n}";
+  toVirIfName = n: v: "vl_${n}";
 
   toIfName = n: v: if (isVLAN n v) then (toVirIfName n v) else v.interface;
   toName = n: v: n;
@@ -225,16 +225,17 @@ in
               counter
             }
 
-            chain prerouting {
-              type nat hook prerouting priority 0;
-              policy accept;
-            }
+            #chain prerouting {
+            #  type nat hook prerouting priority 0;
+            #  policy accept;
+            #}
 
             chain mdnsreflect {
               type filter hook prerouting priority 0;
               policy accept;
-
+            
               ${builtins.concatStringsSep "\n    " (builtins.map toMDNSReflectRule cfg.networkDefs.mDNSReflectors) }
+              ip daddr 224.0.0.251 counter comment "mDNS packets not yet accepted"
             }
 
             # Setup NAT masquerading on the wan interface
