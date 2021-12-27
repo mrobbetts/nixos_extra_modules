@@ -6,10 +6,12 @@ let
   # Helper stuff.
   toVirIfName = n: v: "vl_${n}";
 
-  toIfName = n: v: if (isVLAN n v) then (toVirIfName n v) else v.interface;
+# toIfName = n: v: if (isVLAN n v) then (toVirIfName n v) else v.interface;
+  toIfName = n: v: if (isVLAN n v) then (toVirIfName n v) else cfg.lanIF;
   toName = n: v: n;
 
-  phyIfNameList = lib.mapAttrsToList (n: v: v.interface);
+# phyIfNameList = lib.mapAttrsToList (n: v: v.interface);
+#  phyIfNameList = lib.mapAttrsToList (n: v: cfg.lanIF);
   virIfNameList = lib.mapAttrsToList toVirIfName;
   hasInternetAccess = n: v: v.hasInternetAccess;
 
@@ -17,14 +19,43 @@ let
   isNotVLAN = n: v: ! isVLAN n v;
 
   # Convert a network entry to a nameValuePair to live in networking.vlans.
-  toVLANSpec = n: v: lib.nameValuePair (toVirIfName n v) { id = v.vid; interface = v.interface; };
-
+# toVLANSpec = n: v: lib.nameValuePair (toVirIfName n v) { id = v.vid; interface = v.interface; };
+# toVLANSpec = n: v: lib.nameValuePair (toVirIfName n v) { id = v.vid; interface = cfg.lanIF; };
+/*
   # Convert a network entry to a nameValuePair to live in networking.interfaces.
   toInterfaceSpec = n: v: lib.nameValuePair (toVirIfName n v) { ipv4.addresses = [{
                                                                   address = "10.${cfg.networkDefs.ipBase}.${toString v.ip}.1";
                                                                   prefixLength = 24;
                                                                 }];
                                                               };
+*/
+  vlanToNetdev = n: v: lib.nameValuePair ("41-" + (toVirIfName n v)) {
+                   netdevConfig = {
+                     Name = toVirIfName n v;
+                     Kind = "vlan";
+                   };
+                   vlanConfig = {
+                     Id = v.vid;
+                   };
+                 };
+
+  vlanToNetwork = n: v: lib.nameValuePair ("41-" + (toVirIfName n v)) {
+                    address = [ "10.${cfg.networkDefs.ipBase}.${toString v.ip}.1/24" ];
+                    DHCP = "no";
+                    matchConfig = {
+                      Name = toVirIfName n v;
+                    };
+                  };
+
+  interfaceToNetwork = {
+#    address = [ "10.${cfg.networkDefs.ipBase}.1.1/24" ];
+    DHCP = "no";
+    vlan = virIfNameList cfg.networkDefs.networks;
+    matchConfig = {
+      Name = cfg.lanIF;
+    };
+  };
+
 
 in
 {
@@ -75,6 +106,7 @@ in
             networks = rec {
               # Physical lan0 interface.
               local = {
+                vid = 1;
                 ip  = 1;
                 interface = "lan0";
                 hasInternetAccess = true;
@@ -129,8 +161,16 @@ in
 
     #######
 
-    networking = {
+    systemd = {
+      network = {
+        netdevs  = builtins.listToAttrs (lib.mapAttrsToList vlanToNetdev  (lib.filterAttrs isVLAN cfg.networkDefs.networks));
+        networks = { "41-${cfg.lanIF}" = interfaceToNetwork; } // builtins.listToAttrs (lib.mapAttrsToList vlanToNetwork (lib.filterAttrs isVLAN cfg.networkDefs.networks));
+#       networks = builtins.listToAttrs (lib.mapAttrsToList vlanToNetwork (lib.filterAttrs isVLAN cfg.networkDefs.networks));
+      };
+    };
 
+    networking = {
+/*
       # Set up VLAN interfaces
       interfaces = {
         # wan = {
@@ -143,11 +183,12 @@ in
             prefixLength = 24;
           }];
         };
-      } // (builtins.listToAttrs (lib.mapAttrsToList toInterfaceSpec (lib.filterAttrs isVLAN cfg.networkDefs.networks)));
+      };
+#     // (builtins.listToAttrs (lib.mapAttrsToList toInterfaceSpec (lib.filterAttrs isVLAN cfg.networkDefs.networks)));
 
       # Set up VLANs.
-      vlans = builtins.listToAttrs (lib.mapAttrsToList toVLANSpec (lib.filterAttrs isVLAN cfg.networkDefs.networks));
-
+      #vlans = builtins.listToAttrs (lib.mapAttrsToList toVLANSpec (lib.filterAttrs isVLAN cfg.networkDefs.networks));
+*/
       # Add our routing rules.
       nftables = {
         enable = true;
@@ -308,8 +349,8 @@ in
             "twenty.lan" = (f "twenty" "20");
           };
   */
-          lib.listToAttrs ([(toDNSSpec "local" { ip = 1; })] ++ (lib.mapAttrsToList toDNSSpec cfg.networkDefs.networks));
-          #lib.listToAttrs (lib.mapAttrsToList toDNSSpec networkDefs.networks);
+          #lib.listToAttrs ([(toDNSSpec "local" { ip = 1; })] ++ (lib.mapAttrsToList toDNSSpec cfg.networkDefs.networks));
+          lib.listToAttrs (lib.mapAttrsToList toDNSSpec cfg.networkDefs.networks);
       };
 
       # Add our DHCPD stuff.
@@ -318,7 +359,8 @@ in
         #interfaces = [ "lan0" "vlan10" "vlan20" /* "vlan30" "vlan40" "vlan50" */ ];
         #interfaces = (["lan0"] ++ (virIfNameList (filter isVLAN networkDefs.networks)));
         #interfaces = (phyIfNameList (lib.filterAttrs (x: ! (isVLAN x)) networkDefs.networks)) ++ (virIfNameList (lib.filterAttrs isVLAN networkDefs.networks));
-        interfaces = virIfNameList (lib.filterAttrs isVLAN cfg.networkDefs.networks) ++ (phyIfNameList (lib.filterAttrs isNotVLAN cfg.networkDefs.networks));
+        #interfaces = virIfNameList (lib.filterAttrs isVLAN cfg.networkDefs.networks) ++ (phyIfNameList (lib.filterAttrs isNotVLAN cfg.networkDefs.networks));
+        interfaces = virIfNameList (lib.filterAttrs isVLAN cfg.networkDefs.networks) ++ [ cfg.lanIF ];
         authoritative  = true;
 
         extraConfig = let
