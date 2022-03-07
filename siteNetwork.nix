@@ -29,7 +29,7 @@ let
                                                                 }];
                                                               };
 */
-  vlanToNetdev = n: v: lib.nameValuePair ("41-" + (toVirIfName n v)) {
+  vlanToNetdev = n: v: lib.nameValuePair ("09-" + (toVirIfName n v)) {
                    netdevConfig = {
                      Name = toVirIfName n v;
                      Kind = "vlan";
@@ -39,16 +39,19 @@ let
                    };
                  };
 
-  vlanToNetwork = n: v: lib.nameValuePair ("41-" + (toVirIfName n v)) {
+  vlanToNetwork = n: v: lib.nameValuePair ("11-" + (toVirIfName n v)) {
                     address = [ "10.${cfg.networkDefs.ipBase}.${toString v.ip}.1/24" ];
                     DHCP = "no";
                     matchConfig = {
                       Name = toVirIfName n v;
                     };
+                    linkConfig = {
+                      RequiredForOnline = "yes";
+                    };
                   };
 
   interfaceToNetwork = {
-#    address = [ "10.${cfg.networkDefs.ipBase}.1.1/24" ];
+    address = [ "10.${cfg.networkDefs.ipBase}.1.5/24" ];
     DHCP = "no";
     vlan = virIfNameList cfg.networkDefs.networks;
     matchConfig = {
@@ -150,7 +153,11 @@ in
     };
   };
 
-  config = mkIf cfg.enable {
+  config = 
+
+    let dhcp4Config = config.systemd.services.dhcpd4.unitConfig.After; in
+
+    (mkIf cfg.enable {
     # assertions = [{
     #   assertion = config.networking.firewall.enable == false;
     #   message = "You can not use nftables and iptables at the same time. networking.firewall.enable must be set to false.";
@@ -163,10 +170,37 @@ in
 
     systemd = {
       network = {
-        netdevs  = builtins.listToAttrs (lib.mapAttrsToList vlanToNetdev  (lib.filterAttrs isVLAN cfg.networkDefs.networks));
-        networks = { "41-${cfg.lanIF}" = interfaceToNetwork; } // builtins.listToAttrs (lib.mapAttrsToList vlanToNetwork (lib.filterAttrs isVLAN cfg.networkDefs.networks));
+        netdevs  = builtins.listToAttrs (lib.mapAttrsToList vlanToNetdev (lib.filterAttrs isVLAN cfg.networkDefs.networks));
+        networks = { "10-${cfg.lanIF}" = interfaceToNetwork; } // builtins.listToAttrs (lib.mapAttrsToList vlanToNetwork (lib.filterAttrs isVLAN cfg.networkDefs.networks));
 #       networks = builtins.listToAttrs (lib.mapAttrsToList vlanToNetwork (lib.filterAttrs isVLAN cfg.networkDefs.networks));
       };
+
+      services = 
+      let
+        nameToDeviceName = n: "sys-subsystem-net-devices-${n}.device";
+      in
+      {
+        #nftables.unitConfig.After = lib.mkOverride 0 [ "network.target" "network-online.target" ];
+        #nftables.unitConfig.Wants = lib.mkOverride 0 [ "network.target" "network-online.target" ];
+        #nftables.unitConfig.BindsTo = map nameToDeviceName (virIfNameList cfg.networkDefs.networks);
+        #nftables.unitConfig.After = map nameToDeviceName (virIfNameList cfg.networkDefs.networks);
+        #dhcpd4.unitConfig.BindsTo = map nameToDeviceName (virIfNameList cfg.networkDefs.networks);
+        dhcpd4.unitConfig.After = lib.mkOverride 0 [ "network.target" "network-online.target" ];
+        dhcpd4.unitConfig.Wants = lib.mkOverride 0 [ "network.target" "network-online.target" ];
+        #dhcpd4.unitConfig.After = lib.mkOverride 0 ((map nameToDeviceName (virIfNameList cfg.networkDefs.networks)) ++ [ "network.target" ]);
+      };
+/*
+      services = lib.mkMerge
+      let
+        nameToDeviceName = n: "sys-subsystem-net-devices-${n}.device";
+      in
+      {
+        nftables.unitConfig.BindsTo = map nameToDeviceName (virIfNameList cfg.networkDefs.networks);
+        nftables.unitConfig.After = map nameToDeviceName (virIfNameList cfg.networkDefs.networks);
+        dhcpd4.unitConfig.BindsTo = map nameToDeviceName (virIfNameList cfg.networkDefs.networks);
+        dhcpd4.unitConfig.After = lib.mkMerge [ config.systemd.services.dhcpd4.unitConfig.After (lib.mkAfter (map nameToDeviceName (virIfNameList cfg.networkDefs.networks))) ];
+      };
+*/
     };
 
     networking = {
@@ -210,8 +244,8 @@ in
             sndn = builtins.elemAt (builtins.attrNames l) 1;
           in ''
             # Reflect mDNS traffic between [${fstn}] and [${sndn}]
-            ip daddr 224.0.0.251 iifname { ${enquote (toIfName fstn l."${fstn}")} } counter ip saddr set 10.${cfg.networkDefs.ipBase}.${toString l."${sndn}".ip}.1 dup to 224.0.0.251 device ${enquote (toIfName sndn l."${sndn}")} notrack comment "Reflect mDNS traffic from [${fstn}] to [${sndn}]"
-            ip daddr 224.0.0.251 iifname { ${enquote (toIfName sndn l."${sndn}")} } counter ip saddr set 10.${cfg.networkDefs.ipBase}.${toString l."${fstn}".ip}.1 dup to 224.0.0.251 device ${enquote (toIfName fstn l."${fstn}")} notrack comment "Reflect mDNS traffic from [${sndn}] to [${fstn}]"
+            #ip daddr 224.0.0.251 iifname { ${enquote (toIfName fstn l."${fstn}")} } counter ip saddr set 10.${cfg.networkDefs.ipBase}.${toString l."${sndn}".ip}.1 dup to 224.0.0.251 device ${enquote (toIfName sndn l."${sndn}")} notrack comment "Reflect mDNS traffic from [${fstn}] to [${sndn}]"
+            #ip daddr 224.0.0.251 iifname { ${enquote (toIfName sndn l."${sndn}")} } counter ip saddr set 10.${cfg.networkDefs.ipBase}.${toString l."${fstn}".ip}.1 dup to 224.0.0.251 device ${enquote (toIfName fstn l."${fstn}")} notrack comment "Reflect mDNS traffic from [${sndn}] to [${fstn}]"
           '';
         in ''
           # See https://francis.begyn.be/blog/nixos-home-router
@@ -235,7 +269,7 @@ in
               # Accept traffic on specific ports.
               iifname "${cfg.wanIF}" tcp dport { ssh, http, https, 2022, 22000 } accept
 
-              # Allow returning traffic from wan and drop everthing else
+              # Allow returning traffic from wan and drop everything else
               iifname "${cfg.wanIF}" ct state { established, related } counter accept
             }
 
@@ -271,13 +305,13 @@ in
             #  policy accept;
             #}
 
-            chain mdnsreflect {
-              type filter hook prerouting priority 0;
-              policy accept;
+            #chain mdnsreflect {
+            #  type filter hook prerouting priority 0;
+            #  policy accept;
             
-              ${builtins.concatStringsSep "\n    " (builtins.map toMDNSReflectRule cfg.networkDefs.mDNSReflectors) }
-              ip daddr 224.0.0.251 counter comment "mDNS packets not yet accepted"
-            }
+            #  ${builtins.concatStringsSep "\n    " (builtins.map toMDNSReflectRule cfg.networkDefs.mDNSReflectors) }
+            #  ip daddr 224.0.0.251 counter comment "mDNS packets not yet accepted"
+            #}
 
             # Setup NAT masquerading on the wan interface
             chain postrouting {
@@ -291,6 +325,146 @@ in
     };
 
     services = {
+
+      kea = {
+        ctrl-agent = {
+          enable = false;
+        };
+
+        dhcp4 = {
+          enable = true;
+          settings = {
+
+            # A lease must be renewed within 7 days.
+            valid-lifetime = 604800;
+
+            # By default a lease will expire in 24 hours.
+            renew-timer = 86400;
+
+            # A lease should be renewed at 3 days.
+            rebind-timer = 259200;
+
+            interfaces-config = {
+              #interfaces = [ ... ]; # All interfaces to listen on. All vlans I think.
+              interfaces = virIfNameList (lib.filterAttrs isVLAN cfg.networkDefs.networks) ++ [ cfg.lanIF ];
+            };
+
+            dhcp-ddns = {
+              enable-updates = true;
+              server-ip = "127.0.0.1";
+              server-port = 53001;
+              ncr-protocol = "UDP";
+              ncr-format = "JSON";
+            };
+
+            ddns-send-updates = true;
+            ddns-update-on-renew = true;
+
+            lease-database = {
+              type = "memfile";
+              persist = true;
+              name = "/var/lib/kea/dhcp4.leases";
+            };
+
+            control-socket = {
+              socket-type = "unix";
+              #socket-name = "/path/to/the/unix/socket";
+              socket-name = "/run/kea/kea-dhcp4.socket";
+            };
+
+            subnet4 = 
+            let toSubnetSpec = n: v: {
+              subnet = "10.${cfg.networkDefs.ipBase}.${toString v.ip}.1/24";
+              ddns-qualifying-suffix = "${n}.lan";
+              pools = [{
+                pool = "10.${cfg.networkDefs.ipBase}.${toString v.ip}.32 - 10.${cfg.networkDefs.ipBase}.${toString v.ip}.250";
+              #}];
+
+              #option subnet-mask          255.255.255.0;
+              #option broadcast-address    10.${cfg.networkDefs.ipBase}.${toString v.ip}.255;
+              #option routers              10.${cfg.networkDefs.ipBase}.${toString v.ip}.1;
+              #option domain-name-servers  10.${cfg.networkDefs.ipBase}.${toString v.ip}.1;
+              #option domain-name          "${toIfName n v}.lan";
+              #option netbios-name-servers 10.${cfg.networkDefs.ipBase}.${toString v.ip}.1;
+
+                option-data = [{
+                  name = "routers";
+                  data = "10.${cfg.networkDefs.ipBase}.${toString v.ip}.1";
+                }
+                {
+                  name = "domain-name-servers";
+                  data = "10.${cfg.networkDefs.ipBase}.${toString v.ip}.1";
+                }
+                {
+                  name = "domain-name";
+                  data = "${n}.lan";
+                }
+                {
+                  name = "broadcast-address";
+                  data = "10.${cfg.networkDefs.ipBase}.${toString v.ip}.255";
+                }
+                {
+                  name = "subnet-mask";
+                  data = "255.255.255.0";
+                }];
+              }];
+            };
+            in
+              lib.mapAttrsToList toSubnetSpec cfg.networkDefs.networks;
+          };
+        };
+
+        dhcp-ddns = {
+          enable = true;
+          settings = {
+            ip-address = "127.0.0.1";
+            port = 53001;
+            dns-server-timeout = 100;
+            ncr-protocol = "UDP";
+            ncr-format = "JSON";
+            tsig-keys = [ ];
+            forward-ddns = {
+              #ddns-domains = [ ];
+              ddns-domains = 
+              let toForwardDomain = n: v: {
+                #name = "${toIfName n v}.lan";
+                name = "${n}.lan.";
+                dns-servers = [{
+                  ip-address = "10.${cfg.networkDefs.ipBase}.${toString v.ip}.1";
+                }];
+              };
+              in
+                lib.mapAttrsToList toForwardDomain cfg.networkDefs.networks;
+            };
+            reverse-ddns = {
+              #ddns-domains = [ ];
+              ddns-domains = 
+              let toReverseDomain = n: v: {
+                name = "${toString v.ip}.${cfg.networkDefs.ipBase}.10.in-addr.arpa.";
+                dns-servers = [{
+                  ip-address = "10.${cfg.networkDefs.ipBase}.${toString v.ip}.1";
+                }];
+              };
+              in
+                lib.mapAttrsToList toReverseDomain cfg.networkDefs.networks;
+            };
+/*
+            # Forward zone for network [${toString v.ip}] ("${n}")
+            zone ${toIfName n v}.lan. {                                           # Name of your forward DNS zone
+              primary 10.${cfg.networkDefs.ipBase}.${toString v.ip}.1; # DNS server IP address here
+              #key key-name;
+            }
+
+            # Reverse zone for network [${toString v.ip}] ("${n}")
+            zone ${toString v.ip}.${cfg.networkDefs.ipBase}.10.in-addr.arpa. { # Name of your reverse DNS zone
+              primary 10.${cfg.networkDefs.ipBase}.${toString v.ip}.1;         # DNS server IP address here
+              #key key-name;
+            }
+*/
+          };
+        };
+      };
+
       # Add our DNS.
       bind = {
         enable = true;
@@ -315,11 +489,17 @@ in
           # Try to prevent the `dumping master file: /nix/store/tmp-2if8Kjjd5z: open: unexpected error`
           dump-file "/run/named/cache_dump.db";
         '';
+        extraConfig = ''
+          statistics-channels {
+            inet 127.0.0.1 port 8053 allow { 127.0.0.1; };
+          };
+        '';
         zones =
-        let f = n: v:
+        let
+          forwardZone = n: v:
           {
             master = true;
-            file = pkgs.writeText "db.${n}.lan" ''
+            file = pkgs.writeText "db.${n}.lan.zone" ''
               $TTL 2d    ; 172800 secs default TTL for zone
               $ORIGIN ${n}.lan.
               @             IN      SOA   ns1.${n}.lan. hostmaster.${n}.lan. (
@@ -332,7 +512,7 @@ in
                             IN      NS      ns1.${n}.lan.
                             IN      A       10.${cfg.networkDefs.ipBase}.${toString v.ip}.1
               ns1           IN      A       10.${cfg.networkDefs.ipBase}.${toString v.ip}.1
-              twist         IN      A       10.${cfg.networkDefs.ipBase}.${toString v.ip}.1
+              castor        IN      A       10.${cfg.networkDefs.ipBase}.${toString v.ip}.1
             '';
             extraConfig = ''
               //allow-update { 127.0.0.1; 10.${cfg.networkDefs.ipBase}.${toString v.ip}.1; }; // DDNS this host only
@@ -340,7 +520,29 @@ in
               journal "/run/named/${n}.lan.jnl";
             '';
           };
-          toDNSSpec = n: v: lib.nameValuePair "${n}.lan" (f n v);
+          reverseZone = n: v:
+          {
+            master = true;
+            file = pkgs.writeText "${toString v.ip}.${cfg.networkDefs.ipBase}.10.in-addr.arpa.zone" ''
+              $TTL 2d    ; 172800 secs default TTL for zone
+              ${toString v.ip}.${cfg.networkDefs.ipBase}.10.in-addr.arpa.     IN      SOA   ns1.${n}.lan. hostmaster.${n}.lan. (
+                                      2003080801 ; se = serial number
+                                      12h        ; ref = refresh
+                                      15m        ; ret = update retry
+                                      3w         ; ex = expiry
+                                      3h         ; min = minimum
+                                    )
+                            IN      NS      ns1.${n}.lan.
+              1             IN      PTR     castor.${n}.lan.
+            '';
+            extraConfig = ''
+              //allow-update { 127.0.0.1; 10.${cfg.networkDefs.ipBase}.${toString v.ip}.1; }; // DDNS this host only
+              allow-update { cacheNetworks; };
+              journal "/run/named/${toString v.ip}.${cfg.networkDefs.ipBase}.10.in-addr.arpa.jnl";
+            '';
+          };
+          toForwardZone = n: v: lib.nameValuePair "${n}.lan" (forwardZone n v);
+          toReverseZone = n: v: lib.nameValuePair "${toString v.ip}.${cfg.networkDefs.ipBase}.10.in-addr.arpa" (reverseZone n v);
         in
   /*
           {
@@ -350,12 +552,12 @@ in
           };
   */
           #lib.listToAttrs ([(toDNSSpec "local" { ip = 1; })] ++ (lib.mapAttrsToList toDNSSpec cfg.networkDefs.networks));
-          lib.listToAttrs (lib.mapAttrsToList toDNSSpec cfg.networkDefs.networks);
+          lib.listToAttrs ((lib.mapAttrsToList toForwardZone cfg.networkDefs.networks) ++ (lib.mapAttrsToList toReverseZone cfg.networkDefs.networks));
       };
 
       # Add our DHCPD stuff.
       dhcpd4 = {
-        enable = true;
+        enable = false;
         #interfaces = [ "lan0" "vlan10" "vlan20" /* "vlan30" "vlan40" "vlan50" */ ];
         #interfaces = (["lan0"] ++ (virIfNameList (filter isVLAN networkDefs.networks)));
         #interfaces = (phyIfNameList (lib.filterAttrs (x: ! (isVLAN x)) networkDefs.networks)) ++ (virIfNameList (lib.filterAttrs isVLAN networkDefs.networks));
@@ -366,7 +568,7 @@ in
         extraConfig = let
           dhcpZone = n: v: ''
             # Forward zone for network [${toString v.ip}] ("${n}")
-            zone ${n}.lan. {                                           # Name of your forward DNS zone
+            zone ${toIfName n v}.lan. {                                           # Name of your forward DNS zone
               primary 10.${cfg.networkDefs.ipBase}.${toString v.ip}.1; # DNS server IP address here
               #key key-name;
             }
@@ -389,7 +591,7 @@ in
               option broadcast-address    10.${cfg.networkDefs.ipBase}.${toString v.ip}.255;
               option routers              10.${cfg.networkDefs.ipBase}.${toString v.ip}.1;
               option domain-name-servers  10.${cfg.networkDefs.ipBase}.${toString v.ip}.1;
-              option domain-name          "${n}.lan";
+              option domain-name          "${toIfName n v}.lan";
               option netbios-name-servers 10.${cfg.networkDefs.ipBase}.${toString v.ip}.1;
             }
           '';
@@ -437,5 +639,5 @@ in
     #     ExecStop = "${pkgs.nftables}/bin/nft flush ruleset";
     #   };
     # };
-  };
+  });
 }
