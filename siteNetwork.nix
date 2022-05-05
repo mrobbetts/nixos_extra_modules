@@ -468,11 +468,11 @@ in
       # Add our DNS.
       bind = {
         enable = true;
-        forwarders = [ "192.168.1.3" /*"8.8.8.8" "1.1.1.1"*/ ];
+        ipv4Only = true;
+        #forwarders = [ "192.168.1.3" /*"8.8.8.8" "1.1.1.1"*/ ];
         cacheNetworks = [
           "127.0.0.0/24"
           "10.${cfg.networkDefs.ipBase}.0.0/16"
-          "192.168.1.0/24"
         ];
         listenOn = [
           "any"    # These should be the IP addresses of the interfaces,
@@ -512,7 +512,7 @@ in
                             IN      NS      ns1.${n}.lan.
                             IN      A       10.${cfg.networkDefs.ipBase}.${toString v.ip}.1
               ns1           IN      A       10.${cfg.networkDefs.ipBase}.${toString v.ip}.1
-              castor        IN      A       10.${cfg.networkDefs.ipBase}.${toString v.ip}.1
+              gateway       IN      A       10.${cfg.networkDefs.ipBase}.${toString v.ip}.1
             '';
             extraConfig = ''
               //allow-update { 127.0.0.1; 10.${cfg.networkDefs.ipBase}.${toString v.ip}.1; }; // DDNS this host only
@@ -533,7 +533,7 @@ in
                                       3h         ; min = minimum
                                     )
                             IN      NS      ns1.${n}.lan.
-              1             IN      PTR     castor.${n}.lan.
+              1             IN      PTR     gateway.${n}.lan.
             '';
             extraConfig = ''
               //allow-update { 127.0.0.1; 10.${cfg.networkDefs.ipBase}.${toString v.ip}.1; }; // DDNS this host only
