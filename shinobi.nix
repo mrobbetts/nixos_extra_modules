@@ -94,7 +94,7 @@ in
             db = {
               filename = mkOption {
                 type = types.str;
-                default = "${runtimeDirBase}/db/shinobi.sqlite";
+                default = "${runtimeDirBase}/shinobi.sqlite";
                 description = "The path to store/find the database file.";
               };
             };
@@ -136,13 +136,13 @@ in
       path = [ "/run/wrappers" pkgs.nodejs ];
 
       wantedBy = [ "multi-user.target" ];
-
+/*
       preStart = ''
         if [[ ! -f ${runtimeDirBase}/db/shinobi.sqlite ]]; then
           echo "No database found; copying default into place"
           mkdir -p ${runtimeDirBase}/db
-          cp ${cfg.package}/lib/node_modules/shinobi/sql/shinobi.sample.sqlite ${runtimeDirBase}/db/shinobi.sqlite
-          chmod 644 ${runtimeDirBase}/db/shinobi.sqlite
+          cp ${cfg.package}/lib/node_modules/shinobi/sql/shinobi.sample.sqlite ${runtimeDirBase}/shinobi.sqlite
+          chmod 644 ${runtimeDirBase}/shinobi.sqlite
         else
           echo "Database exists; not copying default"
         fi
@@ -159,7 +159,7 @@ in
         #  echo "Superuser exists; not copying default"
         #fi
       '';
-
+*/
       serviceConfig =
         let
           configJSONFile = 
