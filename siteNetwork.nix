@@ -48,6 +48,13 @@ let
                     linkConfig = {
                       RequiredForOnline = "yes";
                     };
+                    networkConfig = {
+                      Domains = [ "${n}.lan" ];
+
+                      # Set the DNS resolver for addresses in this domain/link to be us. Used
+                      # when the router wants to look up local addresses managed by BIND/Kea.
+                      DNS = "10.${cfg.networkDefs.ipBase}.${toString v.ip}.1:53";
+                    };
                   };
 
   interfaceToNetwork = {
@@ -345,7 +352,7 @@ in
             rebind-timer = 259200;
 
             interfaces-config = {
-              #interfaces = [ ... ]; # All interfaces to listen on. All vlans I think.
+              #interfaces = [ ... ]; # All interfaces to listen on (vlan interface names).
               interfaces = virIfNameList (lib.filterAttrs isVLAN cfg.networkDefs.networks) ++ [ cfg.lanIF ];
             };
 
@@ -375,6 +382,7 @@ in
             subnet4 = 
             let toSubnetSpec = n: v: {
               subnet = "10.${cfg.networkDefs.ipBase}.${toString v.ip}.1/24";
+              id = v.ip;
               ddns-qualifying-suffix = "${n}.lan";
               pools = [{
                 pool = "10.${cfg.networkDefs.ipBase}.${toString v.ip}.32 - 10.${cfg.networkDefs.ipBase}.${toString v.ip}.250";
@@ -406,6 +414,10 @@ in
                 {
                   name = "subnet-mask";
                   data = "255.255.255.0";
+                }
+                {
+                  name = "ntp-servers";
+                  data = "10.${cfg.networkDefs.ipBase}.${toString v.ip}.1";
                 }];
               }];
             };
@@ -496,7 +508,26 @@ in
         '';
         zones =
         let
-          forwardZone = n: v:
+
+          # Convert a network name into an IP subnet string (e.g. "10.2.10/24").
+          #
+          # networkToSubnetString :: String -> String
+          networkToSubnetString = networkName: "10.${cfg.networkDefs.ipBase}.${toString (getAttr networkName cfg.networkDefs.networks).ip}/24";
+
+          # Determine whether the network `{fromn, fromv}` is allowed to initiate with the network `n`.
+          # (Does `from.mayInitiateWith` (which is an attrset) contain an attrset named `n`?)
+          #
+          # canInitiateTo :: String -> String -> Any -> Bool
+          canInitiateTo = n: fromn: fromv: hasAttr n fromv.mayInitiateWith;
+
+          # Convert the network `n` and the set of networks `networks` into a list of network
+          # names which can initiate with the network `n`.
+          #
+          # initiatorListFor :: String -> AttrSet -> [String]
+          initiatorListFor = n: networks: attrNames (filterAttrs (canInitiateTo n) networks);
+
+          # Render zone text for the zone `{n, v}`.
+          forwardZone = n: v: networks:
           {
             master = true;
             file = pkgs.writeText "db.${n}.lan.zone" ''
@@ -517,10 +548,16 @@ in
             extraConfig = ''
               //allow-update { 127.0.0.1; 10.${cfg.networkDefs.ipBase}.${toString v.ip}.1; }; // DDNS this host only
               allow-update { cacheNetworks; };
+              //allow-query { 127.0.0.0/24; 10.${cfg.networkDefs.ipBase}.${toString v.ip}/24; };
+
+              // Allow addresses on this subnet to be resolved only by:
+              // - Hosts on this netowork, and 
+              // - Hosts on those networks that are allowed to "initiate-with" us.
+              allow-query { 127.0.0.0/24; ${concatStringsSep "; " (map networkToSubnetString ([n] ++ initiatorListFor n networks))}; };
               journal "/run/named/${n}.lan.jnl";
             '';
           };
-          reverseZone = n: v:
+          reverseZone = n: v: networks:
           {
             master = true;
             file = pkgs.writeText "${toString v.ip}.${cfg.networkDefs.ipBase}.10.in-addr.arpa.zone" ''
@@ -538,11 +575,13 @@ in
             extraConfig = ''
               //allow-update { 127.0.0.1; 10.${cfg.networkDefs.ipBase}.${toString v.ip}.1; }; // DDNS this host only
               allow-update { cacheNetworks; };
+
+              allow-query { 127.0.0.0/24; ${concatStringsSep "; " (map networkToSubnetString ([n] ++ initiatorListFor n networks))}; };
               journal "/run/named/${toString v.ip}.${cfg.networkDefs.ipBase}.10.in-addr.arpa.jnl";
             '';
           };
-          toForwardZone = n: v: lib.nameValuePair "${n}.lan" (forwardZone n v);
-          toReverseZone = n: v: lib.nameValuePair "${toString v.ip}.${cfg.networkDefs.ipBase}.10.in-addr.arpa" (reverseZone n v);
+          toForwardZone = networks: n: v: lib.nameValuePair "${n}.lan" (forwardZone n v networks);
+          toReverseZone = networks: n: v: lib.nameValuePair "${toString v.ip}.${cfg.networkDefs.ipBase}.10.in-addr.arpa" (reverseZone n v networks);
         in
   /*
           {
@@ -552,7 +591,7 @@ in
           };
   */
           #lib.listToAttrs ([(toDNSSpec "local" { ip = 1; })] ++ (lib.mapAttrsToList toDNSSpec cfg.networkDefs.networks));
-          lib.listToAttrs ((lib.mapAttrsToList toForwardZone cfg.networkDefs.networks) ++ (lib.mapAttrsToList toReverseZone cfg.networkDefs.networks));
+          lib.listToAttrs ((lib.mapAttrsToList (toForwardZone cfg.networkDefs.networks) cfg.networkDefs.networks) ++ (lib.mapAttrsToList (toReverseZone cfg.networkDefs.networks) cfg.networkDefs.networks));
       };
 
       # Add our DHCPD stuff.
