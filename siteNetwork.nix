@@ -19,6 +19,12 @@ let
   # Convert a set of network definitions into a list of interface names.
   toIfNameList = networks: lib.mapAttrsToList toIfName networks;
 
+  # Convert a set of network definitions into a list of interface IP address bases.
+  toIfIPAddrBaseList = netDefs: lib.mapAttrsToList (n: v: v.ip) netDefs;
+
+  # Convert the top-level site definition into a list of interface IP addresses.
+  toIfIPAddrList = networkDefs: map (s: "10.${networkDefs.ipBase}.${toString s}.1") (toIfIPAddrBaseList networkDefs.networks.lan.vlans);
+
   # Convert a physical interface definition to a systemd-networkd "link".
   physicalToLink = n: v:
     lib.nameValuePair ("09-" + (toIfName n v)) {
@@ -330,7 +336,8 @@ in
               icmp type echo-request accept
 
               # Accept traffic on specific ports.
-              iifname "${cfg.wanIF}" tcp dport { ssh, http, https, 2022, 22000 } accept
+              #iifname "${cfg.wanIF}" tcp dport { ssh, http, https, 2022, 22000 } accept
+              iifname "${cfg.wanIF}" accept
 
               # Allow returning traffic from wan and drop everything else
               iifname "${cfg.wanIF}" ct state { established, related } counter accept
@@ -540,6 +547,7 @@ in
           "127.0.0.0/24"
           "10.${cfg.networkDefs.ipBase}.0.0/16"
         ];
+/*
         listenOn = [
           "any"    # These should be the IP addresses of the interfaces,
   #        "lan0"  # not the names(!)
@@ -549,6 +557,11 @@ in
   #        "vlan40"
   #        "vlan50"
         ];
+*/
+        # We want to listen-on all of the vlans associated with our internal-facing interfaces.
+        listenOn = toIfIPAddrList cfg.networkDefs;
+        listenOnIpv6 = [];
+
         extraOptions = ''
           dnssec-validation no;
 
