@@ -179,6 +179,7 @@ in
         WorkingDirectory = "${cfg.package}/lib/node_modules/shinobi";
         RuntimeDirectory = "shinobi";
         StateDirectory = "shinobi";
+        AmbientCapabilities = [ "CAP_NET_BIND_SERVICE" ];
       };
     };
   };
