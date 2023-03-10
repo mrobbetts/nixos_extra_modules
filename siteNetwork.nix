@@ -236,6 +236,7 @@ in
 
     systemd = {
       network = {
+        enable = true;
         netdevs  = netDefsToNetdevs cfg.networkDefs.networks;
         networks = netDefsToNetworks cfg.networkDefs.networks;
         links    = builtins.listToAttrs (lib.mapAttrsToList netDefToLink    (filterAttrs (n: v: v.kind == "eth") cfg.networkDefs.networks));
