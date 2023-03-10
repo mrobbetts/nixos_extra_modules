@@ -4,68 +4,115 @@ let
   cfg = config.networking.siteNetwork;
 
   # Helper stuff.
-  toVirIfName = n: v: "vl_${n}";
-
-# toIfName = n: v: if (isVLAN n v) then (toVirIfName n v) else v.interface;
-  toIfName = n: v: if (isVLAN n v) then (toVirIfName n v) else cfg.lanIF;
   toName = n: v: n;
-
-# phyIfNameList = lib.mapAttrsToList (n: v: v.interface);
-#  phyIfNameList = lib.mapAttrsToList (n: v: cfg.lanIF);
-  virIfNameList = lib.mapAttrsToList toVirIfName;
-  hasInternetAccess = n: v: v.hasInternetAccess;
 
   isVLAN = n: {isVLAN ? false, ...}: isVLAN;
   isNotVLAN = n: v: ! isVLAN n v;
 
-  # Convert a network entry to a nameValuePair to live in networking.vlans.
-# toVLANSpec = n: v: lib.nameValuePair (toVirIfName n v) { id = v.vid; interface = v.interface; };
-# toVLANSpec = n: v: lib.nameValuePair (toVirIfName n v) { id = v.vid; interface = cfg.lanIF; };
-/*
-  # Convert a network entry to a nameValuePair to live in networking.interfaces.
-  toInterfaceSpec = n: v: lib.nameValuePair (toVirIfName n v) { ipv4.addresses = [{
-                                                                  address = "10.${cfg.networkDefs.ipBase}.${toString v.ip}.1";
-                                                                  prefixLength = 24;
-                                                                }];
-                                                              };
-*/
-  vlanToNetdev = n: v: lib.nameValuePair ("09-" + (toVirIfName n v)) {
-                   netdevConfig = {
-                     Name = toVirIfName n v;
-                     Kind = "vlan";
-                   };
-                   vlanConfig = {
-                     Id = v.vid;
-                   };
-                 };
+  # Convert a given network definition into its interface name, taking into account the interface's type.
+  toIfName = n: v:
+    if v.kind == "eth"       then n                else
+    if v.kind == "wireguard" then "wireguard_${n}" else
+    if v.kind == "vlan"      then "vl_${n}"        else
+    error "Unknown interface type: ${v.kind}";
 
-  vlanToNetwork = n: v: lib.nameValuePair ("11-" + (toVirIfName n v)) {
-                    address = [ "10.${cfg.networkDefs.ipBase}.${toString v.ip}.1/24" ];
-                    DHCP = "no";
-                    matchConfig = {
-                      Name = toVirIfName n v;
-                    };
-                    linkConfig = {
-                      RequiredForOnline = "yes";
-                    };
-                    networkConfig = {
-                      Domains = [ "${n}.lan" ];
+  # Convert a set of network definitions into a list of interface names.
+  toIfNameList = networks: lib.mapAttrsToList toIfName networks;
 
-                      # Set the DNS resolver for addresses in this domain/link to be us. Used
-                      # when the router wants to look up local addresses managed by BIND/Kea.
-                      DNS = "10.${cfg.networkDefs.ipBase}.${toString v.ip}.1:53";
-                    };
-                  };
+  # Convert a physical interface definition to a systemd-networkd "link".
+  physicalToLink = n: v:
+    lib.nameValuePair ("09-" + (toIfName n v)) {
+      matchConfig.MACAddress = v.macAddress;
 
-  interfaceToNetwork = {
-    address = [ "10.${cfg.networkDefs.ipBase}.1.5/24" ];
-    DHCP = "no";
-    vlan = virIfNameList cfg.networkDefs.networks;
-    matchConfig = {
-      Name = cfg.lanIF;
+      # Needed so that this link definition won't match all the vlans associated with this interface
+      # (which all share the same MAC address).
+      matchConfig.Type = "!vlan";
+
+      linkConfig.Name = n;
     };
-  };
 
+  # Convert a wireguard interface definition to a systemd-networkd "netdev".
+  wireguardToNetdev = n: v:
+    lib.nameValuePair ("09-" + (toIfName n v)) {
+      netdevConfig = {
+        Kind = "wireguard";
+        Name = toIfName n v;
+      };
+      wireguardConfig = {
+        ListenPort = v.listenPort;
+        PrivateKeyFile = v.privateKeyFile;
+      };
+      wireguardPeers = v.peers;
+    };
+
+  # Convert a vlan interface definition to a systemd-networkd "netdev".
+  vlanToNetdev = n: v:
+    lib.nameValuePair ("09-" + (toIfName n v)) {
+      netdevConfig = {
+        Name = toIfName n v;
+        Kind = "vlan";
+      };
+      vlanConfig = {
+        Id = v.vid;
+      };
+    };
+
+  # Convert a vlan interface definition to a systemd-networkd "network".
+  vlanToNetwork = n: v:
+    lib.nameValuePair ("11-" + (toIfName n v)) {
+      address = [ "10.${cfg.networkDefs.ipBase}.${toString v.ip}.1/24" ];
+      DHCP = "no";
+      matchConfig = {
+        Name = toIfName n v;
+      };
+      linkConfig = {
+        RequiredForOnline = "yes";
+      };
+      networkConfig = {
+        Domains = [ "${n}.${cfg.siteName}" ];
+
+        # Set the DNS resolver for addresses in this domain/link to be us. Used
+        # when the router wants to look up local addresses managed by BIND/Kea.
+        DNS = "10.${cfg.networkDefs.ipBase}.${toString v.ip}.1:53";
+
+        Description = v.description;
+      };
+    };
+
+  wireguardToNetwork = n: v:
+    lib.nameValuePair ("11-" + (toIfName n v)) {
+      matchConfig = {
+        Name = toIfName n v;
+      };
+      address = v.address; # Note, this should be a list of address strings.
+    };
+
+  physicalToNetwork = n: v:
+    lib.nameValuePair ("10-" + (toIfName n v)) ({
+      matchConfig = {
+        Name = (toIfName n v);
+      };
+      networkConfig = {
+        Description = v.description;
+      };
+      #vlan = lib.optionalAttrs (hasAttr "vlans" v) (lib.mapAttrsToList toIfName v.vlans);
+      vlan = if (hasAttr "vlans" v) then (lib.mapAttrsToList toIfName v.vlans) else [];
+    } // (if (hasAttr "networkdNetworkExtras" v) then v.networkdNetworkExtras else {}));
+
+  netDefToNetwork = n: v:
+    if v.kind == "eth"  then physicalToNetwork n v else
+    if v.kind == "vlan" then vlanToNetwork n v else
+    abort "Unknown netdef type for: ${v.kind}";
+
+  netDefToLink = n: v:
+    if v.kind == "eth" then physicalToLink n v else
+    abort "Unknown netdef type for: ${v.kind}";
+
+  netDefsToNetdevs  = networks: builtins.listToAttrs ((lib.mapAttrsToList vlanToNetdev       (filterAttrs (n: v: v.kind == "vlan")      networks))
+                                                   ++ (lib.mapAttrsToList wireguardToNetdev  (filterAttrs (n: v: v.kind == "wireguard") networks)));
+  netDefsToNetworks = networks: builtins.listToAttrs ((lib.mapAttrsToList physicalToNetwork  (filterAttrs (n: v: v.kind == "eth")       networks))
+                                                   ++ (lib.mapAttrsToList wireguardToNetwork (filterAttrs (n: v: v.kind == "wireguard") networks))
+                                                   ++ (lib.mapAttrsToList vlanToNetwork      (filterAttrs (n: v: v.kind == "vlan")      networks)));
 
 in
 {
@@ -81,6 +128,12 @@ in
         description = ''
           Whether to enable siteNetwork.
         '';
+      };
+
+      siteName = mkOption {
+        type = types.str;
+        default = "lan";
+        description = "The string to use as the final section of all domains.";
       };
 
       lanIF = mkOption {
@@ -177,9 +230,9 @@ in
 
     systemd = {
       network = {
-        netdevs  = builtins.listToAttrs (lib.mapAttrsToList vlanToNetdev (lib.filterAttrs isVLAN cfg.networkDefs.networks));
-        networks = { "10-${cfg.lanIF}" = interfaceToNetwork; } // builtins.listToAttrs (lib.mapAttrsToList vlanToNetwork (lib.filterAttrs isVLAN cfg.networkDefs.networks));
-#       networks = builtins.listToAttrs (lib.mapAttrsToList vlanToNetwork (lib.filterAttrs isVLAN cfg.networkDefs.networks));
+        netdevs  = netDefsToNetdevs cfg.networkDefs.networks;
+        networks = netDefsToNetworks cfg.networkDefs.networks;
+        links    = builtins.listToAttrs (lib.mapAttrsToList netDefToLink    (filterAttrs (n: v: v.kind == "eth") cfg.networkDefs.networks));
       };
 
       services = 
@@ -238,9 +291,11 @@ in
           #enquote = n: ''"vlan_${n}"'';
           enquote = n: ''"${n}"'';
 
+          listOfIfNamesOfKind = k: networks: builtins.concatStringsSep ", " (toIfNameList (filterAttrs (n: v: v.kind == k) networks));
+
           toInterSubnetFWRule = n: v:
             if ((builtins.length (builtins.attrNames v.mayInitiateWith)) > 0) then ''
-              # Rule for ${n}
+              # Routing allowances rule for ${n}
               iifname { ${enquote (toIfName n v)} } oifname { ${builtins.concatStringsSep ", " (map enquote (lib.mapAttrsToList toIfName v.mayInitiateWith))} } counter accept comment "Allow ${n} to communicate with ${builtins.concatStringsSep ", " (lib.mapAttrsToList toName v.mayInitiateWith)}"
             ''
             else ''
@@ -268,7 +323,8 @@ in
               policy drop;
 
               # Allow internal networks to access the router
-              iifname { ${builtins.concatStringsSep ", " (["lo" "${cfg.lanIF}"] ++ (virIfNameList cfg.networkDefs.networks))} } counter accept comment "Allow internal networks to access the router"
+              iifname { lo, ${listOfIfNamesOfKind "vlan" cfg.networkDefs.networks} } counter accept comment "Allow internal networks to access the router"
+              iifname { ${listOfIfNamesOfKind "wireguard" cfg.networkDefs.networks} } counter accept comment "Allow wireguard networks to access the router"
 
               # icmp
               icmp type echo-request accept
@@ -292,17 +348,11 @@ in
               # Allow all established traffic; including between restricted VLANs.
               ct state { established, related } counter accept comment "Allow all established traffic"
 
-              #iifname { "vlan_trusted" } oifname { "${cfg.lanIF}" } counter accept
+              iifname { ${listOfIfNamesOfKind "wireguard" cfg.networkDefs.networks} } counter accept comment "Forward traffic from the wireguard network"
+              oifname { ${listOfIfNamesOfKind "wireguard" cfg.networkDefs.networks} } counter accept comment "Forward traffic to the wireguard network"
 
-              # Allow trusted network WAN access
-              iifname { ${builtins.concatStringsSep ", " (lib.mapAttrsToList toIfName (lib.filterAttrs hasInternetAccess cfg.networkDefs.networks))} } oifname { "${cfg.wanIF}" } counter accept comment "Allow trusted LAN to WAN"
-              #iifname { "${cfg.wanIF}" } oifname { ${builtins.concatStringsSep ", " (lib.mapAttrsToList toIfName (lib.filterAttrs hasInternetAccess cfg.networkDefs.networks))} } ct state { established, related } counter accept comment "Allow WAN back to trusted LAN"
-
-              # Allow trusted inter-subnet routing
-              ${builtins.concatStringsSep "\n    " (lib.mapAttrsToList toInterSubnetFWRule cfg.networkDefs.networks)}
-
-              # Allow established WAN to return
-              #iifname { "${cfg.wanIF}" } oifname { ${builtins.concatStringsSep ", "  (["${cfg.lanIF}"] ++ (virIfNameList (lib.filterAttrs hasInternetAccess cfg.networkDefs.networks)))} } ct state { established, related } counter accept comment "Allow established back to LANs"
+              # Allow trusted inter-subnet routing (note, this includes WAN access)
+              ${builtins.concatStringsSep "\n    " (lib.mapAttrsToList toInterSubnetFWRule cfg.networkDefs.networks.lan.vlans)}
 
               counter
             }
@@ -310,14 +360,6 @@ in
             #chain prerouting {
             #  type nat hook prerouting priority 0;
             #  policy accept;
-            #}
-
-            #chain mdnsreflect {
-            #  type filter hook prerouting priority 0;
-            #  policy accept;
-            
-            #  ${builtins.concatStringsSep "\n    " (builtins.map toMDNSReflectRule cfg.networkDefs.mDNSReflectors) }
-            #  ip daddr 224.0.0.251 counter comment "mDNS packets not yet accepted"
             #}
 
             # Setup NAT masquerading on the wan interface
@@ -330,6 +372,17 @@ in
         '';
       };
     };
+
+### Snippet storage...
+            #chain mdnsreflect {
+            #  type filter hook prerouting priority 0;
+            #  policy accept;
+            
+            #  ${builtins.concatStringsSep "\n    " (builtins.map toMDNSReflectRule cfg.networkDefs.mDNSReflectors) }
+            #  ip daddr 224.0.0.251 counter comment "mDNS packets not yet accepted"
+            #}
+
+
 
     services = {
 
@@ -352,8 +405,8 @@ in
             rebind-timer = 259200;
 
             interfaces-config = {
-              #interfaces = [ ... ]; # All interfaces to listen on (vlan interface names).
-              interfaces = virIfNameList (lib.filterAttrs isVLAN cfg.networkDefs.networks) ++ [ cfg.lanIF ];
+              ##interfaces = [ ... ]; # All interfaces to listen on (vlan interface names).
+              interfaces = toIfNameList cfg.networkDefs.networks.lan.vlans;
             };
 
             dhcp-ddns = {
@@ -383,7 +436,7 @@ in
             let toSubnetSpec = n: v: {
               subnet = "10.${cfg.networkDefs.ipBase}.${toString v.ip}.1/24";
               id = v.ip;
-              ddns-qualifying-suffix = "${n}.lan";
+              ddns-qualifying-suffix = "${n}.${cfg.siteName}";
               pools = [{
                 pool = "10.${cfg.networkDefs.ipBase}.${toString v.ip}.32 - 10.${cfg.networkDefs.ipBase}.${toString v.ip}.250";
               #}];
@@ -392,7 +445,7 @@ in
               #option broadcast-address    10.${cfg.networkDefs.ipBase}.${toString v.ip}.255;
               #option routers              10.${cfg.networkDefs.ipBase}.${toString v.ip}.1;
               #option domain-name-servers  10.${cfg.networkDefs.ipBase}.${toString v.ip}.1;
-              #option domain-name          "${toIfName n v}.lan";
+              #option domain-name          "${toIfName n v}.${cfg.siteName}";
               #option netbios-name-servers 10.${cfg.networkDefs.ipBase}.${toString v.ip}.1;
 
                 option-data = [{
@@ -405,7 +458,8 @@ in
                 }
                 {
                   name = "domain-name";
-                  data = "${n}.lan";
+                  #data = "${n}.lan";
+                  data = "${n}.${cfg.siteName}";
                 }
                 {
                   name = "broadcast-address";
@@ -422,7 +476,7 @@ in
               }];
             };
             in
-              lib.mapAttrsToList toSubnetSpec cfg.networkDefs.networks;
+              lib.mapAttrsToList toSubnetSpec cfg.networkDefs.networks.lan.vlans;
           };
         };
 
@@ -439,14 +493,14 @@ in
               #ddns-domains = [ ];
               ddns-domains = 
               let toForwardDomain = n: v: {
-                #name = "${toIfName n v}.lan";
-                name = "${n}.lan.";
+                #name = "${n}.lan.";
+                name = "${n}.${cfg.siteName}.";
                 dns-servers = [{
                   ip-address = "10.${cfg.networkDefs.ipBase}.${toString v.ip}.1";
                 }];
               };
               in
-                lib.mapAttrsToList toForwardDomain cfg.networkDefs.networks;
+                lib.mapAttrsToList toForwardDomain cfg.networkDefs.networks.lan.vlans;
             };
             reverse-ddns = {
               #ddns-domains = [ ];
@@ -458,7 +512,7 @@ in
                 }];
               };
               in
-                lib.mapAttrsToList toReverseDomain cfg.networkDefs.networks;
+                lib.mapAttrsToList toReverseDomain cfg.networkDefs.networks.lan.vlans;
             };
 /*
             # Forward zone for network [${toString v.ip}] ("${n}")
@@ -530,17 +584,17 @@ in
           forwardZone = n: v: networks:
           {
             master = true;
-            file = pkgs.writeText "db.${n}.lan.zone" ''
+            file = pkgs.writeText "db.${n}.${cfg.siteName}.zone" ''
               $TTL 2d    ; 172800 secs default TTL for zone
-              $ORIGIN ${n}.lan.
-              @             IN      SOA   ns1.${n}.lan. hostmaster.${n}.lan. (
+              $ORIGIN ${n}.${cfg.siteName}.
+              @             IN      SOA   ns1.${n}.${cfg.siteName}. hostmaster.${n}.${cfg.siteName}. (
                                       2003080801 ; se = serial number
                                       12h        ; ref = refresh
                                       15m        ; ret = update retry
                                       3w         ; ex = expiry
                                       3h         ; min = minimum
                                     )
-                            IN      NS      ns1.${n}.lan.
+                            IN      NS      ns1.${n}.${cfg.siteName}.
                             IN      A       10.${cfg.networkDefs.ipBase}.${toString v.ip}.1
               ns1           IN      A       10.${cfg.networkDefs.ipBase}.${toString v.ip}.1
               gateway       IN      A       10.${cfg.networkDefs.ipBase}.${toString v.ip}.1
@@ -554,7 +608,7 @@ in
               // - Hosts on this netowork, and 
               // - Hosts on those networks that are allowed to "initiate-with" us.
               allow-query { 127.0.0.0/24; ${concatStringsSep "; " (map networkToSubnetString ([n] ++ initiatorListFor n networks))}; };
-              journal "/run/named/${n}.lan.jnl";
+              journal "/run/named/${n}.${cfg.siteName}.jnl";
             '';
           };
           reverseZone = n: v: networks:
@@ -562,15 +616,15 @@ in
             master = true;
             file = pkgs.writeText "${toString v.ip}.${cfg.networkDefs.ipBase}.10.in-addr.arpa.zone" ''
               $TTL 2d    ; 172800 secs default TTL for zone
-              ${toString v.ip}.${cfg.networkDefs.ipBase}.10.in-addr.arpa.     IN      SOA   ns1.${n}.lan. hostmaster.${n}.lan. (
+              ${toString v.ip}.${cfg.networkDefs.ipBase}.10.in-addr.arpa.     IN      SOA   ns1.${n}.${cfg.siteName}. hostmaster.${n}.${cfg.siteName}. (
                                       2003080801 ; se = serial number
                                       12h        ; ref = refresh
                                       15m        ; ret = update retry
                                       3w         ; ex = expiry
                                       3h         ; min = minimum
                                     )
-                            IN      NS      ns1.${n}.lan.
-              1             IN      PTR     gateway.${n}.lan.
+                            IN      NS      ns1.${n}.${cfg.siteName}.
+              1             IN      PTR     gateway.${n}.${cfg.siteName}.
             '';
             extraConfig = ''
               //allow-update { 127.0.0.1; 10.${cfg.networkDefs.ipBase}.${toString v.ip}.1; }; // DDNS this host only
@@ -580,34 +634,25 @@ in
               journal "/run/named/${toString v.ip}.${cfg.networkDefs.ipBase}.10.in-addr.arpa.jnl";
             '';
           };
-          toForwardZone = networks: n: v: lib.nameValuePair "${n}.lan" (forwardZone n v networks);
+          toForwardZone = networks: n: v: lib.nameValuePair "${n}.${cfg.siteName}" (forwardZone n v networks);
           toReverseZone = networks: n: v: lib.nameValuePair "${toString v.ip}.${cfg.networkDefs.ipBase}.10.in-addr.arpa" (reverseZone n v networks);
         in
-  /*
-          {
-            "local.lan"  = (f "local"  "1");
-            "ten.lan"    = (f "ten"    "10");
-            "twenty.lan" = (f "twenty" "20");
-          };
-  */
-          #lib.listToAttrs ([(toDNSSpec "local" { ip = 1; })] ++ (lib.mapAttrsToList toDNSSpec cfg.networkDefs.networks));
-          lib.listToAttrs ((lib.mapAttrsToList (toForwardZone cfg.networkDefs.networks) cfg.networkDefs.networks) ++ (lib.mapAttrsToList (toReverseZone cfg.networkDefs.networks) cfg.networkDefs.networks));
+          ##lib.listToAttrs ([(toDNSSpec "local" { ip = 1; })] ++ (lib.mapAttrsToList toDNSSpec cfg.networkDefs.networks));
+          lib.listToAttrs ((lib.mapAttrsToList (toForwardZone cfg.networkDefs.networks.lan.vlans) cfg.networkDefs.networks.lan.vlans) ++ (lib.mapAttrsToList (toReverseZone cfg.networkDefs.networks.lan.vlans) cfg.networkDefs.networks.lan.vlans));
       };
 
       # Add our DHCPD stuff.
       dhcpd4 = {
         enable = false;
-        #interfaces = [ "lan0" "vlan10" "vlan20" /* "vlan30" "vlan40" "vlan50" */ ];
-        #interfaces = (["lan0"] ++ (virIfNameList (filter isVLAN networkDefs.networks)));
-        #interfaces = (phyIfNameList (lib.filterAttrs (x: ! (isVLAN x)) networkDefs.networks)) ++ (virIfNameList (lib.filterAttrs isVLAN networkDefs.networks));
-        #interfaces = virIfNameList (lib.filterAttrs isVLAN cfg.networkDefs.networks) ++ (phyIfNameList (lib.filterAttrs isNotVLAN cfg.networkDefs.networks));
-        interfaces = virIfNameList (lib.filterAttrs isVLAN cfg.networkDefs.networks) ++ [ cfg.lanIF ];
+        ##interfaces = [ "lan0" "vlan10" "vlan20" /* "vlan30" "vlan40" "vlan50" */ ];
+        ##interfaces = (["lan0"] ++ (virIfNameList (filter isVLAN networkDefs.networks)));
+        interfaces = (toIfNameList cfg.networkDefs.networks.lan.vlans);
         authoritative  = true;
 
         extraConfig = let
           dhcpZone = n: v: ''
             # Forward zone for network [${toString v.ip}] ("${n}")
-            zone ${toIfName n v}.lan. {                                           # Name of your forward DNS zone
+            zone ${toIfName n v}.${cfg.siteName}. {                    # Name of your forward DNS zone
               primary 10.${cfg.networkDefs.ipBase}.${toString v.ip}.1; # DNS server IP address here
               #key key-name;
             }
@@ -630,7 +675,7 @@ in
               option broadcast-address    10.${cfg.networkDefs.ipBase}.${toString v.ip}.255;
               option routers              10.${cfg.networkDefs.ipBase}.${toString v.ip}.1;
               option domain-name-servers  10.${cfg.networkDefs.ipBase}.${toString v.ip}.1;
-              option domain-name          "${toIfName n v}.lan";
+              option domain-name          "${toIfName n v}.${cfg.siteName}";
               option netbios-name-servers 10.${cfg.networkDefs.ipBase}.${toString v.ip}.1;
             }
           '';
