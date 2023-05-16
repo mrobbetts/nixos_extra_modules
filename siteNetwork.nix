@@ -271,6 +271,9 @@ in
     };
 
     networking = {
+      useNetworkd = mkDefault true;
+      firewall.enable = mkDefault false;
+      nat.enable = mkDefault false;
 /*
       # Set up VLAN interfaces
       interfaces = {
@@ -544,10 +547,12 @@ in
         enable = true;
         ipv4Only = true;
         #forwarders = [ "192.168.1.3" /*"8.8.8.8" "1.1.1.1"*/ ];
+
         cacheNetworks = [
           "127.0.0.0/24"
           "10.${cfg.networkDefs.ipBase}.0.0/16"
         ];
+
 /*
         listenOn = [
           "any"    # These should be the IP addresses of the interfaces,
@@ -597,6 +602,7 @@ in
           # Render zone text for the zone `{n, v}`.
           forwardZone = n: v: networks:
           {
+            allowQuery = [ "127.0.0.0/24" ] ++ (map networkToSubnetString ([n] ++ initiatorListFor n networks));
             master = true;
             file = pkgs.writeText "db.${n}.${cfg.siteName}.zone" ''
               $TTL 2d    ; 172800 secs default TTL for zone
@@ -615,18 +621,19 @@ in
             '';
             extraConfig = ''
               //allow-update { 127.0.0.1; 10.${cfg.networkDefs.ipBase}.${toString v.ip}.1; }; // DDNS this host only
-              allow-update { cacheNetworks; };
-              //allow-query { 127.0.0.0/24; 10.${cfg.networkDefs.ipBase}.${toString v.ip}/24; };
+              //allow-update { cacheNetworks; };
+              allow-update { 127.0.0.0/24; ${concatStringsSep "; " (map networkToSubnetString ([n] ++ initiatorListFor n networks))}; };
 
               // Allow addresses on this subnet to be resolved only by:
               // - Hosts on this netowork, and 
               // - Hosts on those networks that are allowed to "initiate-with" us.
-              allow-query { 127.0.0.0/24; ${concatStringsSep "; " (map networkToSubnetString ([n] ++ initiatorListFor n networks))}; };
+              //allow-query { 127.0.0.0/24; ${concatStringsSep "; " (map networkToSubnetString ([n] ++ initiatorListFor n networks))}; };
               journal "/run/named/${n}.${cfg.siteName}.jnl";
             '';
           };
           reverseZone = n: v: networks:
           {
+            allowQuery = [ "127.0.0.0/24" ] ++ (map networkToSubnetString ([n] ++ initiatorListFor n networks));
             master = true;
             file = pkgs.writeText "${toString v.ip}.${cfg.networkDefs.ipBase}.10.in-addr.arpa.zone" ''
               $TTL 2d    ; 172800 secs default TTL for zone
@@ -644,7 +651,7 @@ in
               //allow-update { 127.0.0.1; 10.${cfg.networkDefs.ipBase}.${toString v.ip}.1; }; // DDNS this host only
               allow-update { cacheNetworks; };
 
-              allow-query { 127.0.0.0/24; ${concatStringsSep "; " (map networkToSubnetString ([n] ++ initiatorListFor n networks))}; };
+              //allow-query { 127.0.0.0/24; ${concatStringsSep "; " (map networkToSubnetString ([n] ++ initiatorListFor n networks))}; };
               journal "/run/named/${toString v.ip}.${cfg.networkDefs.ipBase}.10.in-addr.arpa.jnl";
             '';
           };
