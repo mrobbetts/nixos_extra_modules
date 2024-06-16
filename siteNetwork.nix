@@ -2,9 +2,20 @@
 with lib;
 let
   cfg = config.networking.siteNetwork;
+  hostname = config.networking.hostName;
 
   # Helper stuff.
+  ip = import ./helpers/ip.nix lib;
+
   toName = n: v: n;
+
+  padWithSpacesToLength = n: s:
+#  let
+#    length = stringLength s;
+#    numSpaces = length - n;
+#  in
+    if (stringLength s) - n >= 0 then s
+                                 else (padWithSpacesToLength n (s + " "));
 
   isVLAN = n: {isVLAN ? false, ...}: isVLAN;
   isNotVLAN = n: v: ! isVLAN n v;
@@ -20,10 +31,107 @@ let
   toIfNameList = networks: lib.mapAttrsToList toIfName networks;
 
   # Convert a set of network definitions into a list of interface IP address bases.
-  toIfIPAddrBaseList = netDefs: lib.mapAttrsToList (n: v: v.ip) netDefs;
+  #toIfIPAddrBaseList = netDefs: lib.mapAttrsToList (n: v: v.ip) netDefs;
 
   # Convert the top-level site definition into a list of interface IP addresses.
-  toIfIPAddrList = networkDefs: map (s: "10.${networkDefs.ipBase}.${toString s}.1") (toIfIPAddrBaseList networkDefs.networks.lan.vlans);
+  #toIfIPAddrList = networkDefs: map (s: "10.${networkDefs.ipBase}.${toString s}.1") (toIfIPAddrBaseList networkDefs.networks.lan.vlans);
+  toIfIPAddrList = networkDefs: lib.mapAttrsToList (n: v: ip.prettyNthAddressIn cfg.networkDefs.ipSpace v.ip 1) networkDefs.networks.lan.vlans;
+
+  networkDefToPrettySubnet = n: v: ip.prettySubnet (ip.subnetIn cfg.networkDefs.ipSpace v.ip);
+
+  # Convert a network name into an IP subnet string (e.g. "10.2.10/24").
+  #
+  # networkToSubnetString :: String -> String
+  #networkToSubnetString = networkName: "10.${cfg.networkDefs.ipBase}.${toString (getAttr networkName cfg.networkDefs.networks).ip}/24";
+  #networkToSubnetString = networkName: ip.prettySubnet (ip.subnetIn cfg.networkDefs.ipSpace (getAttr networkName cfg.networkDefs.networks).ip);
+  networkNameToPrettySubnet = networkName: networkDefToPrettySubnet networkName (getAttr networkName cfg.networkDefs.networks);
+
+  # Determine whether the network `{fromn, fromv}` is allowed to initiate with the network `n`.
+  # (Does `from.mayInitiateWith` (which is an attrset) contain an attrset named `n`?)
+  #
+  # canInitiateTo :: String -> String -> Any -> Bool
+  canInitiateTo = n: fromn: fromv: hasAttr n fromv.mayInitiateWith;
+
+  # Convert the network `n` and the set of networks `networks` into a list of network
+  # names which can initiate with the network `n`.
+  #
+  # initiatorListFor :: String -> AttrSet -> [String]
+  initiatorListFor = n: networks: attrNames (filterAttrs (canInitiateTo n) networks);
+
+/*
+  ###
+  # Thanks to infinisil!!
+  #
+  # https://discourse.nixos.org/t/manipulate-ip-addresses-in-nix-lang/33363/2
+  # https://github.com/infinisil/system/blob/f41c1437aa146fcfd038694d92a077a02f01f142/deploy/lib/ip.nix
+  parseIp = str: map lib.toInt (builtins.match "([0-9]+)\\.([0-9]+)\\.([0-9]+)\\.([0-9]+)" str);
+  prettyIp = lib.concatMapStringsSep "." toString;
+
+  ipListToInt = ipList: foldl' (x: y: x * 256 + y) 0 ipList;
+  #intToIPList = 
+
+  cidrToMask =
+    let
+      # Generate a partial mask for an integer from 0 to 7
+      #   part 1 = 128
+      #   part 7 = 254
+      part = n:
+        if n == 0 then 0
+        else part (n - 1) / 2 + 128;
+    in cidr:
+      let
+        # How many initial parts of the mask are full (=255)
+        fullParts = cidr / 8;
+      in lib.genList (i:
+        # Fill up initial full parts
+        if i < fullParts then 255
+        # If we're above the first non-full part, fill with 0
+        else if fullParts < i then 0
+        # First non-full part generation
+        else part (lib.mod cidr 8)
+      ) 4;
+
+  parseSubnet = str:
+    let
+      splitParts = builtins.split "/" str;
+      givenIp = parseIp (lib.elemAt splitParts 0);
+      cidr = lib.toInt (lib.elemAt splitParts 2);
+      mask = cidrToMask cidr;
+      baseIp = lib.zipListsWith lib.bitAnd givenIp mask;
+      range = {
+        from = baseIp;
+        to = lib.zipListsWith (b: m: 255 - m + b) baseIp mask;
+      };
+      check = ip: baseIp == lib.zipListsWith (b: m: lib.bitAnd b m) ip mask;
+      warn = if baseIp == givenIp then lib.id else lib.warn
+        ( "subnet ${str} has a too specific base address ${prettyIp givenIp}, "
+        + "which will get masked to ${prettyIp baseIp}, which should be used instead");
+    in warn {
+      inherit baseIp cidr mask range check;
+      subnet = "${prettyIp baseIp}/${toString cidr}";
+    };
+  ###
+*/
+  #ipStuff = import ./helpers/ip.nix lib;
+
+  # Compute subnet string: e.g. "10.1.10.1/24".
+  # Examples:
+  # (toSubnetInCIDR "192.168.0.0/23" 3 2) -> "192.168.0.128/26";
+
+/*
+  toSubnetInCIDR = ipSpace: numBitsForSubnets: networkIndex:
+    let 
+      parsedIP = ipStuff.parseSubnet ipSpace;
+      subnetScale = 32 - (parsedIP.cidr + numBitsForSubnets);
+      intIp = ipStuff.ipListToInt parsedIP.baseIp;
+      newSubnet = ipStuff.intToIPList (intIp + (networkIndex * (ipStuff.pow subnetScale 2)));
+      newCidr = parsedIP.cidr + numBitsForSubnets;
+    in
+      #"${parsedIP.baseIp}/${toString (parsedIP.cidr + numBitsForSubnets)}";
+      #"${(parseSubnet ipSpace).baseIp}/${toString ((parseSubnet ipSpace).cidr + numBitsForSubnets)}";
+      #"${ipStuff.prettyIp parsedIP.baseIp}/${toString (parsedIP.cidr + numBitsForSubnets)} Integer version: ${toString intIp}. And back, as: ${ipStuff.prettyIp (ipStuff.intToIPList intIp)}";
+      "New Subnet: ${toString newSubnet}/${toString newCidr}";
+*/
 
   # Convert a physical interface definition to a systemd-networkd "link".
   physicalToLink = n: v:
@@ -66,7 +174,8 @@ let
   # Convert a vlan interface definition to a systemd-networkd "network".
   vlanToNetwork = n: v:
     lib.nameValuePair ("11-" + (toIfName n v)) {
-      address = [ "10.${cfg.networkDefs.ipBase}.${toString v.ip}.1/24" ];
+      #address = [ "10.${cfg.networkDefs.ipBase}.${toString v.ip}.1/24" ];
+      address = [ "${ip.prettySubnet (ip.nthAddressIn cfg.networkDefs.ipSpace v.ip 1)}" ];
       DHCP = "no";
       matchConfig = {
         Name = toIfName n v;
@@ -79,7 +188,8 @@ let
 
         # Set the DNS resolver for addresses in this domain/link to be us. Used
         # when the router wants to look up local addresses managed by BIND/Kea.
-        DNS = "10.${cfg.networkDefs.ipBase}.${toString v.ip}.1:53";
+        #DNS = "10.${cfg.networkDefs.ipBase}.${toString v.ip}.1:53";
+        DNS = "${ip.prettyNthAddressIn cfg.networkDefs.ipSpace v.ip 1}:53";
 
         Description = v.description;
       };
@@ -340,8 +450,8 @@ in
               icmp type echo-request accept
 
               # Accept traffic on specific ports.
-              #iifname "${cfg.wanIF}" tcp dport { ssh, http, https, 2022, 22000 } accept
-              iifname "${cfg.wanIF}" accept
+              iifname "${cfg.wanIF}" tcp dport { ssh, http, https, 2022, 22000 } accept
+              #iifname "${cfg.wanIF}" accept
 
               # Allow returning traffic from wan and drop everything else
               iifname "${cfg.wanIF}" ct state { established, related } counter accept
@@ -412,8 +522,14 @@ in
             # By default a lease will expire in 24 hours.
             renew-timer = 86400;
 
+            # By default a lease will expire in 30 minutes.            
+            #renew-timer = 1800;
+
             # A lease should be renewed at 3 days.
             rebind-timer = 259200;
+
+            # A lease should be renewed at 2 hours.
+            #rebind-timer = 7200;
 
             interfaces-config = {
               ##interfaces = [ ... ]; # All interfaces to listen on (vlan interface names).
@@ -440,16 +556,26 @@ in
             control-socket = {
               socket-type = "unix";
               #socket-name = "/path/to/the/unix/socket";
-              socket-name = "/run/kea/kea-dhcp4.socket";
+              #socket-name = "/run/kea/kea-dhcp4.socket";
+              socket-name = "/run/kea-dhcp4/kea-dhcp4.socket";
             };
 
             subnet4 = 
             let toSubnetSpec = n: v: {
-              subnet = "10.${cfg.networkDefs.ipBase}.${toString v.ip}.1/24";
-              id = v.ip;
+              #subnet = "10.${cfg.networkDefs.ipBase}.${toString v.ip}.1/24";
+              subnet = ip.prettySubnetIn cfg.networkDefs.ipSpace v.ip; # e.g. "10.1.4.1/24"
+              id = v.ip + 1;
               ddns-qualifying-suffix = "${n}.${cfg.siteName}";
-              pools = [{
-                pool = "10.${cfg.networkDefs.ipBase}.${toString v.ip}.32 - 10.${cfg.networkDefs.ipBase}.${toString v.ip}.250";
+              pools = 
+              let
+                routerAddress = ip.nthAddressIn cfg.networkDefs.ipSpace v.ip 1;
+                broadcastAddress = ip.to (ip.subnetIn cfg.networkDefs.ipSpace v.ip);
+                lastHostAddress = ip.prettyIp (ip.intToIpList ((ip.ipListToInt broadcastAddress) - 1));
+                dhcpStartAddress = ip.prettyIp (ip.intToIpList ((ip.ipListToInt routerAddress.addr) + (ip.cidrToNumAddresses routerAddress.cidr) / 4));
+              in
+              [{
+                #pool = "10.${cfg.networkDefs.ipBase}.${toString v.ip}.128 - 10.${cfg.networkDefs.ipBase}.${toString v.ip}.250";
+                pool = "${dhcpStartAddress} - ${lastHostAddress}";
               #}];
 
               #option subnet-mask          255.255.255.0;
@@ -459,13 +585,29 @@ in
               #option domain-name          "${toIfName n v}.${cfg.siteName}";
               #option netbios-name-servers 10.${cfg.networkDefs.ipBase}.${toString v.ip}.1;
 
-                option-data = [{
+                option-data = 
+                # We include the "routers" element here only if endpoints on the network in
+                # question may initiate traffic with another network. If not, we provide no
+                # routers, and the endpoints will not setup a default route through it.
+                (if (v.mayInitiateWith != {}) then 
+                [{
+                  name = "routers";
+                  #data = "10.${cfg.networkDefs.ipBase}.${toString v.ip}.1";
+                  data = ip.prettyIp routerAddress.addr;
+                }]
+                else [])
+                ++
+                [
+/*
+                {
                   name = "routers";
                   data = "10.${cfg.networkDefs.ipBase}.${toString v.ip}.1";
                 }
+*/
                 {
                   name = "domain-name-servers";
-                  data = "10.${cfg.networkDefs.ipBase}.${toString v.ip}.1";
+                  #data = "10.${cfg.networkDefs.ipBase}.${toString v.ip}.1";
+                  data = ip.prettyIp routerAddress.addr;
                 }
                 {
                   name = "domain-name";
@@ -474,15 +616,18 @@ in
                 }
                 {
                   name = "broadcast-address";
-                  data = "10.${cfg.networkDefs.ipBase}.${toString v.ip}.255";
+                  #data = "10.${cfg.networkDefs.ipBase}.${toString v.ip}.255";
+                  data = ip.prettyIp broadcastAddress;
                 }
                 {
                   name = "subnet-mask";
-                  data = "255.255.255.0";
+                  #data = "255.255.255.0";
+                  data = ip.prettyIp (ip.cidrToMask (ip.subnetIn cfg.networkDefs.ipSpace v.ip).cidr);
                 }
                 {
                   name = "ntp-servers";
-                  data = "10.${cfg.networkDefs.ipBase}.${toString v.ip}.1";
+                  #data = "10.${cfg.networkDefs.ipBase}.${toString v.ip}.1";
+                  data = ip.prettyIp routerAddress.addr;
                 }];
               }];
             };
@@ -507,7 +652,9 @@ in
                 #name = "${n}.lan.";
                 name = "${n}.${cfg.siteName}.";
                 dns-servers = [{
-                  ip-address = "10.${cfg.networkDefs.ipBase}.${toString v.ip}.1";
+                  #ip-address = "10.${cfg.networkDefs.ipBase}.${toString v.ip}.1";
+                  #ip-address = ip.prettyNthAddressIn cfg.networkDefs.ipSpace v.ip 1;
+                  ip-address = "127.0.0.1";
                 }];
               };
               in
@@ -516,14 +663,27 @@ in
             reverse-ddns = {
               #ddns-domains = [ ];
               ddns-domains = 
+/*
               let toReverseDomain = n: v: {
-                name = "${toString v.ip}.${cfg.networkDefs.ipBase}.10.in-addr.arpa.";
+                #name = "${toString v.ip}.${cfg.networkDefs.ipBase}.10.in-addr.arpa.";
+                name = "${ip.prettyIpReverse (ip.subnetIn cfg.networkDefs.ipSpace v.ip).addr}.in-addr.arpa.";
                 dns-servers = [{
-                  ip-address = "10.${cfg.networkDefs.ipBase}.${toString v.ip}.1";
+                  #ip-address = "10.${cfg.networkDefs.ipBase}.${toString v.ip}.1";
+                  ip-address = ip.prettyNthAddressIn cfg.networkDefs.ipSpace v.ip 1;
                 }];
               };
               in
                 lib.mapAttrsToList toReverseDomain cfg.networkDefs.networks.lan.vlans;
+*/
+              [{
+                #name = "${toString v.ip}.${cfg.networkDefs.ipBase}.10.in-addr.arpa.";
+                #name = "${ip.prettyIpReverse (ip.subnetIn cfg.networkDefs.ipSpace v.ip).addr}.in-addr.arpa.";
+                name = "168.192.in-addr.arpa.";
+                dns-servers = [{
+                  #ip-address = ip.prettyNthAddressIn cfg.networkDefs.ipSpace 0 1;
+                  ip-address = "127.0.0.1";
+                }];
+              }];
             };
 /*
             # Forward zone for network [${toString v.ip}] ("${n}")
@@ -548,10 +708,7 @@ in
         ipv4Only = true;
         #forwarders = [ "192.168.1.3" /*"8.8.8.8" "1.1.1.1"*/ ];
 
-        cacheNetworks = [
-          "127.0.0.0/24"
-          "10.${cfg.networkDefs.ipBase}.0.0/16"
-        ];
+        cacheNetworks = [ "127.0.0.0/24" ] ++ lib.mapAttrsToList networkDefToPrettySubnet cfg.networkDefs.networks.lan.vlans;
 
 /*
         listenOn = [
@@ -565,7 +722,7 @@ in
         ];
 */
         # We want to listen-on all of the vlans associated with our internal-facing interfaces.
-        listenOn = toIfIPAddrList cfg.networkDefs;
+        listenOn = ["127.0.0.1"] ++ toIfIPAddrList cfg.networkDefs;
         listenOnIpv6 = [];
 
         extraOptions = ''
@@ -581,29 +738,13 @@ in
         '';
         zones =
         let
-
-          # Convert a network name into an IP subnet string (e.g. "10.2.10/24").
-          #
-          # networkToSubnetString :: String -> String
-          networkToSubnetString = networkName: "10.${cfg.networkDefs.ipBase}.${toString (getAttr networkName cfg.networkDefs.networks).ip}/24";
-
-          # Determine whether the network `{fromn, fromv}` is allowed to initiate with the network `n`.
-          # (Does `from.mayInitiateWith` (which is an attrset) contain an attrset named `n`?)
-          #
-          # canInitiateTo :: String -> String -> Any -> Bool
-          canInitiateTo = n: fromn: fromv: hasAttr n fromv.mayInitiateWith;
-
-          # Convert the network `n` and the set of networks `networks` into a list of network
-          # names which can initiate with the network `n`.
-          #
-          # initiatorListFor :: String -> AttrSet -> [String]
-          initiatorListFor = n: networks: attrNames (filterAttrs (canInitiateTo n) networks);
-
           # Render zone text for the zone `{n, v}`.
           forwardZone = n: v: networks:
           {
-            allowQuery = [ "127.0.0.0/24" ] ++ (map networkToSubnetString ([n] ++ initiatorListFor n networks));
+            #allowQuery = [ "127.0.0.0/24" ] ++ (map networkToSubnetString ([n] ++ initiatorListFor n networks));
+            allowQuery = [ "127.0.0.0/24" ] ++ (map networkNameToPrettySubnet ([n] ++ initiatorListFor n networks));
             master = true;
+            # Old owner/IN line:               IN      A       10.${cfg.networkDefs.ipBase}.${toString v.ip}.1
             file = pkgs.writeText "db.${n}.${cfg.siteName}.zone" ''
               $TTL 2d    ; 172800 secs default TTL for zone
               $ORIGIN ${n}.${cfg.siteName}.
@@ -615,29 +756,53 @@ in
                                       3h         ; min = minimum
                                     )
                             IN      NS      ns1.${n}.${cfg.siteName}.
-                            IN      A       10.${cfg.networkDefs.ipBase}.${toString v.ip}.1
-              ns1           IN      A       10.${cfg.networkDefs.ipBase}.${toString v.ip}.1
-              gateway       IN      A       10.${cfg.networkDefs.ipBase}.${toString v.ip}.1
+                            IN      A       ${ip.prettyNthAddressIn cfg.networkDefs.ipSpace v.ip 1}
+              ns1           IN      A       ${ip.prettyNthAddressIn cfg.networkDefs.ipSpace v.ip 1}
+              gateway       IN      A       ${ip.prettyNthAddressIn cfg.networkDefs.ipSpace v.ip 1}
+              ${padWithSpacesToLength 14 hostname}IN      A       ${ip.prettyNthAddressIn cfg.networkDefs.ipSpace v.ip 1}
             '';
             extraConfig = ''
-              //allow-update { 127.0.0.1; 10.${cfg.networkDefs.ipBase}.${toString v.ip}.1; }; // DDNS this host only
+              //TEST: ${ip.prettySubnetIn cfg.networkDefs.ipSpace 0}
+              //TEST: ${ip.prettyNthAddressIn cfg.networkDefs.ipSpace 0 1}
+              //TEST: ${ip.prettyNthAddressIn cfg.networkDefs.ipSpace 0 16}
+              //TEST: ${ip.prettySubnetIn cfg.networkDefs.ipSpace 1}
+              //TEST: ${ip.prettySubnetIn cfg.networkDefs.ipSpace 2}
+              //TEST: ${ip.prettySubnetIn cfg.networkDefs.ipSpace 3}
+              //TEST: ${ip.prettySubnetIn cfg.networkDefs.ipSpace 4}
+              //TEST: ${ip.prettyNthAddressIn cfg.networkDefs.ipSpace 4 1}
+              //TEST: ${ip.prettyNthAddressIn cfg.networkDefs.ipSpace 4 16}
+              //TEST: ${ip.prettyNthAddressIn cfg.networkDefs.ipSpace 4 129}
+              //TEST: ${ip.prettySubnetIn cfg.networkDefs.ipSpace 5}
+              //TEST: ${ip.prettySubnetIn cfg.networkDefs.ipSpace 6}
+              //TEST: ${ip.prettySubnetIn cfg.networkDefs.ipSpace 7}
+              ////allow-update { 127.0.0.1; 10.${cfg.networkDefs.ipBase}.${toString v.ip}.1; }; // DDNS this host only
+              //allow-update { 127.0.0.1; ${ip.prettyNthAddressIn cfg.networkDefs.ipSpace v.ip 1}; }; // DDNS this host only
               //allow-update { cacheNetworks; };
-              allow-update { 127.0.0.0/24; ${concatStringsSep "; " (map networkToSubnetString ([n] ++ initiatorListFor n networks))}; };
+              allow-update { 127.0.0.0/24; ${concatStringsSep "; " (map networkNameToPrettySubnet ([n] ++ initiatorListFor n networks))}; };
 
               // Allow addresses on this subnet to be resolved only by:
               // - Hosts on this netowork, and 
               // - Hosts on those networks that are allowed to "initiate-with" us.
-              //allow-query { 127.0.0.0/24; ${concatStringsSep "; " (map networkToSubnetString ([n] ++ initiatorListFor n networks))}; };
+              //allow-query { 127.0.0.0/24; ${concatStringsSep "; " (map networkNameToPrettySubnet ([n] ++ initiatorListFor n networks))}; };
               journal "/run/named/${n}.${cfg.siteName}.jnl";
             '';
           };
+          # 1.2.0.192.in-addr.arpa IN CNAME 1.0-63.2.0.192.in-addr.arpa.
+          #let extraCNameEntry = ipReverse: "${ipReverse}.in-addr.arpa IN CNAME 1.0-63.2.0.192.in-addr.arpa."
+/*
           reverseZone = n: v: networks:
           {
-            allowQuery = [ "127.0.0.0/24" ] ++ (map networkToSubnetString ([n] ++ initiatorListFor n networks));
-            master = true;
-            file = pkgs.writeText "${toString v.ip}.${cfg.networkDefs.ipBase}.10.in-addr.arpa.zone" ''
+            #allowQuery = [ "127.0.0.0/24" ] ++ (map networkToSubnetString ([n] ++ initiatorListFor n networks));
+            allowQuery = [ "127.0.0.0/24" ] ++ (map networkNameToPrettySubnet ([n] ++ initiatorListFor n networks));
+            master = true;        
+            #file = pkgs.writeText "${toString v.ip}.${cfg.networkDefs.ipBase}.10.in-addr.arpa.zone" ''
+            #Old SOA line... ${toString v.ip}.${cfg.networkDefs.ipBase}.10.in-addr.arpa.     IN      SOA   ns1.${n}.${cfg.siteName}. hostmaster.${n}.${cfg.siteName}. (
+            file = let
+              zoneLabel = "z${ip.prettyIpReverse (ip.subnetIn cfg.networkDefs.ipSpace v.ip).addr}.in-addr.arpa.";
+            in
+            pkgs.writeText "${ip.prettyIpReverse (ip.subnetIn cfg.networkDefs.ipSpace v.ip).addr}.in-addr.arpa.zone" ''
               $TTL 2d    ; 172800 secs default TTL for zone
-              ${toString v.ip}.${cfg.networkDefs.ipBase}.10.in-addr.arpa.     IN      SOA   ns1.${n}.${cfg.siteName}. hostmaster.${n}.${cfg.siteName}. (
+              ${ip.prettyIpReverse (ip.subnetIn cfg.networkDefs.ipSpace v.ip).addr}.in-addr.arpa.     IN      SOA   ns1.${n}.${cfg.siteName}. hostmaster.${n}.${cfg.siteName}. (
                                       2003080801 ; se = serial number
                                       12h        ; ref = refresh
                                       15m        ; ret = update retry
@@ -648,24 +813,148 @@ in
               1             IN      PTR     gateway.${n}.${cfg.siteName}.
             '';
             extraConfig = ''
-              //allow-update { 127.0.0.1; 10.${cfg.networkDefs.ipBase}.${toString v.ip}.1; }; // DDNS this host only
+              ////allow-update { 127.0.0.1; 10.${cfg.networkDefs.ipBase}.${toString v.ip}.1; }; // DDNS this host only
+              //allow-update { 127.0.0.1; ${ip.prettyNthAddressIn cfg.networkDefs.ipSpace v.ip 1}; }; // DDNS this host only
               allow-update { cacheNetworks; };
 
-              //allow-query { 127.0.0.0/24; ${concatStringsSep "; " (map networkToSubnetString ([n] ++ initiatorListFor n networks))}; };
-              journal "/run/named/${toString v.ip}.${cfg.networkDefs.ipBase}.10.in-addr.arpa.jnl";
+              //allow-query { 127.0.0.0/24; ${concatStringsSep "; " (map networkNameToPrettySubnet ([n] ++ initiatorListFor n networks))}; };
+              //journal "/run/named/${toString v.ip}.${cfg.networkDefs.ipBase}.10.in-addr.arpa.jnl";
+              journal "/run/named/${ip.prettyIpReverse (ip.subnetIn cfg.networkDefs.ipSpace v.ip).addr}.in-addr.arpa.jnl";
             '';
           };
-          toForwardZone = networks: n: v: lib.nameValuePair "${n}.${cfg.siteName}" (forwardZone n v networks);
-          toReverseZone = networks: n: v: lib.nameValuePair "${toString v.ip}.${cfg.networkDefs.ipBase}.10.in-addr.arpa" (reverseZone n v networks);
+*/
+/*
+          reverseZone = networkDefs:
+          let
+            zoneLabel = "168.192.in-addr.arpa.";
+            #ipSpace  = networkDefs.ipSpace;
+            ipSpace  = "192.168.0.0/16"; # Hard-code to a boundary for now...
+            networks = networkDefs.networks.lan.vlans;
+          in
+          {
+            #allowQuery = [ "127.0.0.0/24" ] ++ (map networkNameToPrettySubnet ([n] ++ initiatorListFor n networks));
+            master = true;
+            #file = pkgs.writeText "${toString v.ip}.${cfg.networkDefs.ipBase}.10.in-addr.arpa.zone" ''
+            #Old SOA line... ${toString v.ip}.${cfg.networkDefs.ipBase}.10.in-addr.arpa.     IN      SOA   ns1.${n}.${cfg.siteName}. hostmaster.${n}.${cfg.siteName}. (
+            file = let
+              #zoneLabel = networkIndex: "${ip.prettySubnetReverse (ip.subnetIn cfg.networkDefs.ipSpace networkIndex)}.in-addr.arpa.";
+              zoneLabelFor = networkIndex: "${ip.prettySubnetReverse (ip.subnetIn cfg.networkDefs.ipSpace networkIndex)}.in-addr.arpa.";
+              extraCNameEntry = networkIndex: n: "${ip.prettyIpReverse (ip.nthAddressIn networkDefs.ipSpace networkIndex n).addr}.in-addr.arpa. IN CNAME ${toString n}.${zoneLabelFor networkIndex}";
+            in
+            pkgs.writeText "${zoneLabel}.zone" ''
+              $TTL 2d    ; 172800 secs default TTL for zone
+              ${zoneLabel}     IN      SOA   ns1.${cfg.siteName}. hostmaster.${cfg.siteName}. (
+                                      2003080801 ; se = serial number
+                                      12h        ; ref = refresh
+                                      15m        ; ret = update retry
+                                      3w         ; ex = expiry
+                                      3h         ; min = minimum
+                                    )
+                            IN      NS      ns1.${cfg.siteName}.
+              ;1.0           IN      PTR     gateway.${cfg.siteName}.
+
+              ${lib.concatMapStringsSep "\n" (networkIndex: concatStringsSep "\n" (map (extraCNameEntry networkIndex) (genList (x: x + 1) ((ip.cidrToNumAddresses (ip.subnetIn networkDefs.ipSpace networkIndex).cidr) - 1)))) (lib.mapAttrsToList (n: v: v.ip) networks)}
+            '';
+            extraConfig = ''
+              allow-update { cacheNetworks; };
+              journal "/run/named/${zoneLabel}.jnl";
+            '';
+          };
+*/
+          reverseZone = networkDefs:
+          let
+            zoneLabel = "168.192.in-addr.arpa.";
+            #ipSpace  = networkDefs.ipSpace;
+            ipSpace  = "192.168.0.0/16"; # Hard-code to a boundary for now...
+            networks = networkDefs.networks.lan.vlans;
+          in
+          {
+            #allowQuery = [ "127.0.0.0/24" ] ++ (map networkNameToPrettySubnet ([n] ++ initiatorListFor n networks));
+            master = true;
+            #file = pkgs.writeText "${toString v.ip}.${cfg.networkDefs.ipBase}.10.in-addr.arpa.zone" ''
+            #Old SOA line... ${toString v.ip}.${cfg.networkDefs.ipBase}.10.in-addr.arpa.     IN      SOA   ns1.${n}.${cfg.siteName}. hostmaster.${n}.${cfg.siteName}. (
+            file = let
+              #zoneLabel = networkIndex: "${ip.prettySubnetReverse (ip.subnetIn cfg.networkDefs.ipSpace networkIndex)}.in-addr.arpa.";
+              zoneLabelFor = networkIndex: "${ip.prettySubnetReverse (ip.subnetIn cfg.networkDefs.ipSpace networkIndex)}.in-addr.arpa.";
+              extraCNameEntry = networkIndex: n: "${ip.prettyIpReverse (ip.nthAddressIn networkDefs.ipSpace networkIndex n).addr}.in-addr.arpa. IN CNAME ${toString n}.${zoneLabelFor networkIndex}";
+            in
+            pkgs.writeText "${zoneLabel}.zone" ''
+              $TTL 2d    ; 172800 secs default TTL for zone
+              ${zoneLabel}     IN      SOA   ns1.${cfg.siteName}. hostmaster.${cfg.siteName}. (
+                                      2003080801 ; se = serial number
+                                      12h        ; ref = refresh
+                                      15m        ; ret = update retry
+                                      3w         ; ex = expiry
+                                      3h         ; min = minimum
+                                    )
+                            IN      NS      ns1.${cfg.siteName}.
+              ;1.0           IN      PTR     gateway.${cfg.siteName}.
+            '';
+            extraConfig = ''
+              allow-update { cacheNetworks; };
+              journal "/run/named/${zoneLabel}.jnl";
+            '';
+          };
+          reverseZoneProxy = n: v: networks:
+          let            
+              zoneLabel = "${ip.prettySubnetReverse (ip.subnetIn cfg.networkDefs.ipSpace v.ip)}.in-addr.arpa.";
+          in
+          {
+            allowQuery = [ "127.0.0.0/24" ] ++ (map networkNameToPrettySubnet ([n] ++ initiatorListFor n networks));
+            master = true;        
+            #file = pkgs.writeText "${toString v.ip}.${cfg.networkDefs.ipBase}.10.in-addr.arpa.zone" ''
+            file = let
+              extraCNameEntry = n: "${ip.prettyIpReverse (ip.nthAddressIn cfg.networkDefs.ipSpace v.ip n).addr}.in-addr.arpa. IN CNAME ${toString n}.${zoneLabel}";
+            in
+            pkgs.writeText "${zoneLabel}.zone" ''
+              $TTL 2d    ; 172800 secs default TTL for zone
+              ${zoneLabel}     IN      SOA   ns1.${n}.${cfg.siteName}. hostmaster.${n}.${cfg.siteName}. (
+                                      2003080801 ; se = serial number
+                                      12h        ; ref = refresh
+                                      15m        ; ret = update retry
+                                      3w         ; ex = expiry
+                                      3h         ; min = minimum
+                                    )
+                            IN      NS      ns1.${n}.${cfg.siteName}.
+              1             IN      PTR     gateway.${n}.${cfg.siteName}.
+              ;${ip.prettyIpReverse (ip.nthAddressIn cfg.networkDefs.ipSpace v.ip 1).addr}.in-addr.arpa.   IN      PTR     gateway.${n}.${cfg.siteName}. 
+            '';
+            extraConfig = ''
+              ////allow-update { 127.0.0.1; 10.${cfg.networkDefs.ipBase}.${toString v.ip}.1; }; // DDNS this host only
+              //allow-update { 127.0.0.1; ${ip.prettyNthAddressIn cfg.networkDefs.ipSpace v.ip 1}; }; // DDNS this host only
+              allow-update { cacheNetworks; };
+
+              //allow-query { 127.0.0.0/24; ${concatStringsSep "; " (map networkNameToPrettySubnet ([n] ++ initiatorListFor n networks))}; };
+              //journal "/run/named/${toString v.ip}.${cfg.networkDefs.ipBase}.10.in-addr.arpa.jnl";
+              //journal "/run/named/${ip.prettyIpReverse (ip.subnetIn cfg.networkDefs.ipSpace v.ip).addr}.in-addr.arpa.jnl";
+              journal "/run/named/${zoneLabel}.jnl";
+            '';
+          };
+
+          toForwardZone      = networks: n: v: lib.nameValuePair "${n}.${cfg.siteName}" (forwardZone n v networks);
+          #toReverseZone     = networks: n: v: lib.nameValuePair "${toString v.ip}.${cfg.networkDefs.ipBase}.10.in-addr.arpa" (reverseZone n v networks);
+          toReverseZoneProxy = networks: n: v: lib.nameValuePair "${ip.prettySubnetReverse (ip.subnetIn cfg.networkDefs.ipSpace v.ip)}.in-addr.arpa" (reverseZoneProxy n v networks);
+          toReverseZone      = networkDefs:    lib.nameValuePair "168.192.in-addr.arpa" (reverseZone networkDefs);
         in
           ##lib.listToAttrs ([(toDNSSpec "local" { ip = 1; })] ++ (lib.mapAttrsToList toDNSSpec cfg.networkDefs.networks));
-          lib.listToAttrs ((lib.mapAttrsToList (toForwardZone cfg.networkDefs.networks.lan.vlans) cfg.networkDefs.networks.lan.vlans) ++ (lib.mapAttrsToList (toReverseZone cfg.networkDefs.networks.lan.vlans) cfg.networkDefs.networks.lan.vlans));
+          #lib.listToAttrs ((lib.mapAttrsToList (toForwardZone cfg.networkDefs.networks.lan.vlans) cfg.networkDefs.networks.lan.vlans) ++ (lib.mapAttrsToList (toReverseZone cfg.networkDefs.networks.lan.vlans) cfg.networkDefs.networks.lan.vlans));
+          lib.listToAttrs ((lib.mapAttrsToList (toForwardZone      cfg.networkDefs.networks.lan.vlans) cfg.networkDefs.networks.lan.vlans) 
+#                        ++ (lib.mapAttrsToList (toReverseZoneProxy cfg.networkDefs.networks.lan.vlans) cfg.networkDefs.networks.lan.vlans)
+                        ++                     [(toReverseZone      cfg.networkDefs)]
+          );
       };
-
+/*
       # Add our DHCPD stuff.
       dhcpd4 = {
         enable = false;
-        ##interfaces = [ "lan0" "vlan10" "vlan20" /* "vlan30" "vlan40" "vlan50" */ ];
+        ##interfaces = [
+          "lan0"
+          "vlan10"
+          "vlan20"
+          #"vlan30"
+          #"vlan40"
+          #"vlan50"
+        ];
         ##interfaces = (["lan0"] ++ (virIfNameList (filter isVLAN networkDefs.networks)));
         interfaces = (toIfNameList cfg.networkDefs.networks.lan.vlans);
         authoritative  = true;
@@ -711,6 +1000,7 @@ in
           ${builtins.concatStringsSep "\n" (lib.mapAttrsToList dhcpZone cfg.networkDefs.networks)}
         '';
       };
+*/
     };
 
     #######
