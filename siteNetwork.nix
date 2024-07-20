@@ -556,8 +556,8 @@ in
             control-socket = {
               socket-type = "unix";
               #socket-name = "/path/to/the/unix/socket";
-              #socket-name = "/run/kea/kea-dhcp4.socket";
-              socket-name = "/run/kea-dhcp4/kea-dhcp4.socket";
+              socket-name = "/run/kea/kea-dhcp4.socket";
+              #socket-name = "/run/kea-dhcp4/kea-dhcp4.socket";
             };
 
             subnet4 = 
